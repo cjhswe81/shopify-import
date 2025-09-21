@@ -1,0 +1,60 @@
+name: Daily Shopify Import
+
+on:
+  schedule:
+    # Runs at 2 AM UTC daily (adjust time as needed)
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
+
+jobs:
+  shopify-import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240  # 4 hour timeout as safety buffer
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests python-dotenv pillow
+      
+      - name: Run Chevalier Import
+        env:
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
+        run: |
+          echo "Starting Chevalier import at $(date)"
+          python shopify_import_chevalier.py
+          echo "Chevalier import completed at $(date)"
+      
+      - name: Run Deerhunter Import  
+        env:
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_FILE_PATH: ${{ secrets.FTP_FILE_PATH }}
+        run: |
+          echo "Starting Deerhunter import at $(date)"
+          python shopify_import_deerhunter.py
+          echo "Deerhunter import completed at $(date)"
+      
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: import-logs
+          path: |
+            *.log
+            progress.txt
+            chevalier_image_imported.json
+            deerhunter_validation_cache.json
+          retention-days: 7
