@@ -9,7 +9,7 @@ on:
 jobs:
   shopify-import:
     runs-on: ubuntu-latest
-    timeout-minutes: 240  # 4 hour timeout as safety buffer
+    timeout-minutes: 300  # 5 hour timeout as safety buffer
     
     steps:
       - name: Checkout repository

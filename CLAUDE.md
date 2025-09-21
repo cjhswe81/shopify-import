@@ -124,10 +124,10 @@ FTP_FILE_PATH=/path/to/csv/file.csv
 Based on testing (2025-09-09):
 - **Chevalier**: ~38 minutes (275 products)
 - **Deerhunter**: ~1h 58m (508 products)
-- **Total Runtime**: ~2h 36m
+- **Total Runtime**: ~2h 36m (locally)
 
 ### GitHub Actions Workflow
-Since the combined runtime is under 3 hours, GitHub Actions is perfect for daily automation (6-hour timeout for public repos).
+GitHub Actions provides a 6-hour timeout for public repos. We use a 5-hour timeout as a safety buffer since GitHub Actions runners may be slower than local machines.
 
 Create `.github/workflows/shopify-import.yml`:
 
@@ -141,7 +141,7 @@ on:
 jobs:
   shopify-import:
     runs-on: ubuntu-latest
-    timeout-minutes: 240  # 4 hour timeout as safety
+    timeout-minutes: 300  # 5 hour timeout as safety buffer
     
     steps:
       - uses: actions/checkout@v3
