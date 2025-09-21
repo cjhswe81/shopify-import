@@ -124,10 +124,26 @@ FTP_FILE_PATH=/path/to/csv/file.csv
 Based on testing (2025-09-09):
 - **Chevalier**: ~38 minutes (275 products)
 - **Deerhunter**: ~1h 58m (508 products)
-- **Total Runtime**: ~2h 36m (locally)
+- **Total Runtime**: ~2h 36m (locally), ~4h+ (GitHub Actions)
 
 ### GitHub Actions Workflow
-GitHub Actions provides a 6-hour timeout for public repos. We use a 5-hour timeout as a safety buffer since GitHub Actions runners may be slower than local machines.
+GitHub Actions provides a 6-hour timeout for public repos. We use a 5h 50m timeout to ensure completion since GitHub Actions runners are slower than local machines.
+
+### Caching and Resume Capability
+The workflow implements persistent caching to handle interruptions and avoid re-processing:
+
+#### Cache Files
+- **`chevalier_image_imported.json`**: Tracks which Chevalier product images have been uploaded
+- **`deerhunter_validation_cache.json`**: Caches validated Deerhunter images to skip re-validation
+- **`progress.txt`**: Tracks last successfully imported Deerhunter product for resume capability
+
+#### How Caching Works
+1. **GitHub Actions Cache**: Uses `actions/cache@v3` to persist files between workflow runs
+2. **Resume on Failure**: If the workflow times out or fails:
+   - Chevalier will skip already uploaded images (via JSON cache)
+   - Deerhunter will resume from the last product in `progress.txt`
+3. **Automatic Cleanup**: `progress.txt` is automatically deleted when all products import successfully
+4. **Debug Artifacts**: On failure, all cache and log files are uploaded as artifacts for debugging
 
 Create `.github/workflows/shopify-import.yml`:
 
@@ -141,7 +157,7 @@ on:
 jobs:
   shopify-import:
     runs-on: ubuntu-latest
-    timeout-minutes: 300  # 5 hour timeout as safety buffer
+    timeout-minutes: 350  # 5 hours 50 minutes timeout
     
     steps:
       - uses: actions/checkout@v3
@@ -153,7 +169,19 @@ jobs:
       
       - name: Install dependencies
         run: pip install requests python-dotenv pillow
-      
+
+      # Restore cache files from previous runs
+      - name: Restore cache files
+        uses: actions/cache@v3
+        with:
+          path: |
+            chevalier_image_imported.json
+            deerhunter_validation_cache.json
+            progress.txt
+          key: shopify-cache-${{ github.run_number }}
+          restore-keys: |
+            shopify-cache-
+
       - name: Run Chevalier Import
         env:
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
@@ -169,6 +197,20 @@ jobs:
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           FTP_FILE_PATH: ${{ secrets.FTP_FILE_PATH }}
         run: python shopify_import_deerhunter.py
+
+      # Upload debug files on failure for troubleshooting
+      - name: Upload debug files on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: import-failure-debug-${{ github.run_number }}
+          path: |
+            *.log
+            chevalier_image_imported.json
+            deerhunter_validation_cache.json
+            progress.txt
+          retention-days: 7
+          if-no-files-found: ignore
 ```
 
 ### Setup Instructions

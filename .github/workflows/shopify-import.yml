@@ -9,21 +9,33 @@ on:
 jobs:
   shopify-import:
     runs-on: ubuntu-latest
-    timeout-minutes: 300  # 5 hour timeout as safety buffer
+    timeout-minutes: 350  # 5 hours 50 minutes timeout
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-      
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests python-dotenv pillow
+
+      # Restore cache files from previous runs
+      - name: Restore cache files
+        uses: actions/cache@v3
+        with:
+          path: |
+            chevalier_image_imported.json
+            deerhunter_validation_cache.json
+            progress.txt
+          key: shopify-cache-${{ github.run_number }}
+          restore-keys: |
+            shopify-cache-
       
       - name: Run Chevalier Import
         env:
@@ -47,14 +59,16 @@ jobs:
           python shopify_import_deerhunter.py
           echo "Deerhunter import completed at $(date)"
       
-      - name: Upload artifacts on failure
+      # Upload logs and cache files on failure for debugging
+      - name: Upload debug files on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: import-logs
+          name: import-failure-debug-${{ github.run_number }}
           path: |
             *.log
-            progress.txt
             chevalier_image_imported.json
             deerhunter_validation_cache.json
+            progress.txt
           retention-days: 7
+          if-no-files-found: ignore

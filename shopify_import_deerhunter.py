@@ -582,8 +582,8 @@ def main():
         print("\n✅ Alla produkter importerades utan fel.")
     
     # Remove progress file if we've completed all products successfully
-    # (no failed imports and we processed all groups)
-    if not failed_imports and not skipping:
+    # (no failed imports)
+    if not failed_imports:
         if os.path.exists(progress_file):
             os.remove(progress_file)
             print(f"\n🧹 Progress-fil '{progress_file}' raderad (alla produkter importerades framgångsrikt).")
