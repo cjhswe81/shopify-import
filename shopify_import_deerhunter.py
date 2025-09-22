@@ -581,12 +581,11 @@ def main():
     else:
         print("\n✅ Alla produkter importerades utan fel.")
     
-    # Remove progress file if we've completed all products successfully
-    # (no failed imports)
-    if not failed_imports:
-        if os.path.exists(progress_file):
-            os.remove(progress_file)
-            print(f"\n🧹 Progress-fil '{progress_file}' raderad (alla produkter importerades framgångsrikt).")
+    # Remove progress file since we've completed processing all products
+    # (regardless of whether some imports failed)
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
+        print(f"\n🧹 Progress-fil '{progress_file}' raderad (import slutförd).")
     
     # Calculate and display execution time
     end_time = datetime.now()
