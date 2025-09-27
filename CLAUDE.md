@@ -107,7 +107,7 @@ FTP_FILE_PATH=/path/to/csv/file.csv
 ### Common Development Tasks
 
 1. **Adding New Data Source**: Copy existing script structure, modify parsing logic
-2. **Debugging Failed Imports**: Check cache files and progress.txt for state
+2. **Debugging Failed Imports**: Check cache files for state (progress.txt only exists during interrupted runs)
 3. **Testing API Calls**: Comment out `requests.post/put` calls and print payloads
 4. **Handling New Product Types**: Update category detection logic in scripts
 
@@ -135,14 +135,14 @@ The workflow implements persistent caching to handle interruptions and avoid re-
 #### Cache Files
 - **`chevalier_image_imported.json`**: Tracks which Chevalier product images have been uploaded
 - **`deerhunter_validation_cache.json`**: Caches validated Deerhunter images to skip re-validation
-- **`progress.txt`**: Tracks last successfully imported Deerhunter product for resume capability
+- **`progress.txt`**: Tracks last successfully imported Deerhunter product for resume capability (automatically deleted after complete runs)
 
 #### How Caching Works
 1. **GitHub Actions Cache**: Uses `actions/cache@v3` to persist files between workflow runs
 2. **Resume on Failure**: If the workflow times out or fails:
    - Chevalier will skip already uploaded images (via JSON cache)
    - Deerhunter will resume from the last product in `progress.txt`
-3. **Automatic Cleanup**: `progress.txt` is automatically deleted when all products import successfully
+3. **Automatic Cleanup**: `progress.txt` is automatically deleted when import completes (regardless of individual product failures)
 4. **Debug Artifacts**: On failure, all cache and log files are uploaded as artifacts for debugging
 
 Create `.github/workflows/shopify-import.yml`:

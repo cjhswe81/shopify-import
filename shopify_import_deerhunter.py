@@ -207,12 +207,41 @@ def transform_group_to_product(group):
     for row in group:
         sku = f"{row.get('Product_Number','').strip()}-{row.get('Colour_Number','').strip()}-{row.get('Size','').strip()}"
         original_price = float((row.get("Retail_Price", "") or "0").replace(",", "."))
+        wholesale_price = float((row.get("Wholesale_Price", "") or "0").replace(",", "."))
         is_outlet = row.get("Outlet", "").strip().lower() == "yes"
+
         if is_outlet:
-            discounted_price = round(original_price * 0.7, 2)
+            # Dynamic pricing based on wholesale/retail ratio
+            if wholesale_price > 0 and original_price > 0:
+                cost_ratio = wholesale_price / original_price
+
+                # Determine profit multiplier based on margin
+                if cost_ratio < 0.20:  # <20% cost (very high margin)
+                    target_multiplier = 2.5  # 150% profit margin
+                elif cost_ratio < 0.30:  # <30% cost (high margin)
+                    target_multiplier = 2.2  # 120% profit margin
+                elif cost_ratio < 0.40:  # <40% cost (medium margin)
+                    target_multiplier = 2.0  # 100% profit margin
+                else:  # >=40% cost (low margin)
+                    target_multiplier = 1.8  # 80% profit margin
+
+                # Calculate outlet price
+                outlet_price = wholesale_price * target_multiplier
+
+                # Never more than 30% discount (70% of retail)
+                max_price = original_price * 0.70
+                discounted_price = min(outlet_price, max_price)
+
+                # Round to 2 decimals
+                discounted_price = round(discounted_price, 2)
+            else:
+                # Fallback to 30% discount if data missing
+                discounted_price = round(original_price * 0.7, 2)
+
             price_str = f"{discounted_price:.2f}"
             compare_str = f"{original_price:.2f}"
         else:
+            # Non-outlet: keep original price
             price_str = f"{original_price:.2f}"
             compare_str = None
 
