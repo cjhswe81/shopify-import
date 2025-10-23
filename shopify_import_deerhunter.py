@@ -783,12 +783,13 @@ def main():
     total_products = len(groups)
     processed_count = 0
     for product_number, group in groups.items():
+        processed_count += 1
+
         if skipping:
             if str(product_number) == str(last_completed_product):
                 skipping = False
             continue
 
-        processed_count += 1
         print(f"\n📦 Processing product {processed_count}/{total_products} (#{product_number})...")
         product_payload = transform_group_to_product(group)
         if product_payload:
