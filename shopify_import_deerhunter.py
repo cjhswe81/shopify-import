@@ -436,6 +436,12 @@ def transform_group_to_product(group):
                         variant_image_map[lower_color] = url
                         break
 
+    # Skip products where all variants have price = 0
+    all_prices_zero = all(float(v.get("price", "0")) <= 0 for v in variants)
+    if all_prices_zero:
+        print(f"⚠️ Skippade produkt (alla varianter har pris = 0 kr): {product_name}")
+        return None
+
     colors = list({v["option1"] for v in variants if v["option1"]})
     sizes = list({v["option2"] for v in variants if v["option2"]})
     options = [
