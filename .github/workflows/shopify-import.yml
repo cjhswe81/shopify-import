@@ -39,15 +39,6 @@ jobs:
           restore-keys: |
             shopify-cache-v2-
 
-      - name: Run Chevalier Import
-        env:
-          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
-          SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
-        run: |
-          echo "Starting Chevalier import at $(date)"
-          python -u shopify_import_chevalier.py
-          echo "Chevalier import completed at $(date)"
-      
       - name: Run Deerhunter Import
         env:
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
@@ -60,6 +51,15 @@ jobs:
           echo "Starting Deerhunter import at $(date)"
           python -u shopify_import_deerhunter.py
           echo "Deerhunter import completed at $(date)"
+
+      - name: Run Chevalier Import
+        env:
+          SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+          SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
+        run: |
+          echo "Starting Chevalier import at $(date)"
+          python -u shopify_import_chevalier.py
+          echo "Chevalier import completed at $(date)"
 
       # Save cache even on timeout/failure (runs always)
       - name: Save cache files

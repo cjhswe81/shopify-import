@@ -722,23 +722,24 @@ grouped_products_list = list(grouped_products.values())
 print(f"Found {len(grouped_products_list)} product groups from XML.")
 
 imported_product_ids = []
+unique_tags = set()
 for i, group in enumerate(grouped_products_list, 1):
     print(f"\n📦 Processing product {i}/{len(grouped_products_list)}...")
     product_data = extract_group_product_data(group)
+
+    # Samla unika tags medan vi processar
+    tags_str = product_data.get("tags", "")
+    for tag in tags_str.split(","):
+        t = tag.strip()
+        if t and not t.startswith("group_sku:") and not t.startswith("handle:"):
+            unique_tags.add(t)
+
     prod_id = send_to_shopify(product_data)
     if prod_id:
         imported_product_ids.append(prod_id)
     time.sleep(1.0)  # För att undvika rate limits
 
 save_image_import_cache()  # Sparar cache ännu en gång efter loopen
-
-unique_tags = set()
-for product in products_data:
-    tags_str = product.get("tags", "")
-    for tag in tags_str.split(","):
-        t = tag.strip()
-        if t and not t.startswith("group_sku:") and not t.startswith("handle:"):
-            unique_tags.add(t)
 print("Unika taggar (för smart collections):", unique_tags)
 
 existing_collections = get_existing_smart_collections()
