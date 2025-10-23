@@ -721,11 +721,11 @@ grouped_products = group_products(root)
 grouped_products_list = list(grouped_products.values())
 print(f"Found {len(grouped_products_list)} product groups from XML.")
 
-products_data = [extract_group_product_data(group) for group in grouped_products_list]
-
 imported_product_ids = []
-for product in products_data:
-    prod_id = send_to_shopify(product)
+for i, group in enumerate(grouped_products_list, 1):
+    print(f"\n📦 Processing product {i}/{len(grouped_products_list)}...")
+    product_data = extract_group_product_data(group)
+    prod_id = send_to_shopify(product_data)
     if prod_id:
         imported_product_ids.append(prod_id)
     time.sleep(1.0)  # För att undvika rate limits

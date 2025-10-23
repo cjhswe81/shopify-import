@@ -780,12 +780,16 @@ def main():
         print(f"⏩ Återupptar från produktnummer efter: {last_completed_product}")
 
     skipping = bool(last_completed_product)
+    total_products = len(groups)
+    processed_count = 0
     for product_number, group in groups.items():
         if skipping:
             if str(product_number) == str(last_completed_product):
                 skipping = False
             continue
 
+        processed_count += 1
+        print(f"\n📦 Processing product {processed_count}/{total_products} (#{product_number})...")
         product_payload = transform_group_to_product(group)
         if product_payload:
             prod_id, error_msg = send_to_shopify(product_payload)

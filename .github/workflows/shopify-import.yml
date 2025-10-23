@@ -45,7 +45,7 @@ jobs:
           SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
         run: |
           echo "Starting Chevalier import at $(date)"
-          python shopify_import_chevalier.py
+          python -u shopify_import_chevalier.py
           echo "Chevalier import completed at $(date)"
       
       - name: Run Deerhunter Import
@@ -58,7 +58,7 @@ jobs:
           FTP_FILE_PATH: ${{ secrets.FTP_FILE_PATH }}
         run: |
           echo "Starting Deerhunter import at $(date)"
-          python shopify_import_deerhunter.py
+          python -u shopify_import_deerhunter.py
           echo "Deerhunter import completed at $(date)"
 
       # Save cache even on timeout/failure (runs always)
