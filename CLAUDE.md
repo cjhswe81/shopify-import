@@ -80,10 +80,11 @@ Both scripts follow similar patterns but with data source-specific implementatio
 | Feature | Chevalier | Deerhunter |
 |---------|-----------|------------|
 | Data Source | XML from URL | CSV from FTP |
-| Image Validation | No | Yes (size/dimensions) |
+| Image Validation | Yes (size/dimensions/resize) | Yes (size/dimensions/resize) |
+| Image Resizing | Yes (auto-resize to 1500x1500) | Yes (auto-resize to 1500x1500) |
 | Progress Resumption | No | Yes (progress.txt) |
 | Price Handling | Standard | Dynamic outlet pricing |
-| Cache File | chevalier_image_imported.json | deerhunter_validation_cache.json |
+| Cache Files | chevalier_image_imported.json<br>chevalier_validation_cache.json | deerhunter_image_imported.json<br>deerhunter_validation_cache.json |
 
 ### Deerhunter Dynamic Outlet Pricing (Updated 2025-09-27)
 
@@ -105,6 +106,43 @@ The Deerhunter script implements dynamic outlet pricing based on wholesale/retai
 - Product with 45% cost ratio: 784 SEK wholesale → 1225 SEK outlet price (30% max discount)
 
 This strategy optimizes for competitive Google Shopping placement while maintaining profitability.
+
+### Automatic Image Resizing (Updated 2025-10-23)
+
+Both Chevalier and Deerhunter scripts implement identical automatic image resizing to ensure compatibility with Google Shopping and optimize performance:
+
+**Image Size Limits (Google Shopping Compliance):**
+- **Max file size**: 16MB (Google Shopping maximum)
+- **Max dimensions**: 8000x8000px (64 megapixels, Google Shopping maximum)
+- **Resize target**: 1500x1500px (Google Shopping recommended size)
+
+**How It Works:**
+1. **Detection**: Script checks each image for:
+   - File size >16MB
+   - Width or height >8000px
+2. **Automatic Resizing**: If limits exceeded:
+   - Resizes to max 1500x1500px (maintains aspect ratio)
+   - Converts to JPEG with 85% quality
+   - Removes alpha channel (converts RGBA/PNG to RGB)
+   - Uploads as base64 attachment to Shopify
+3. **Normal Processing**: If within limits:
+   - Uploads directly via URL (faster, no processing)
+4. **Caching**: Tracks which images need resizing to avoid re-processing
+
+**Benefits:**
+- ✅ All images compatible with Google Shopping (no rejections)
+- ✅ Faster page load times (smaller file sizes)
+- ✅ No manual intervention needed
+- ✅ Significantly reduced storage costs
+- ✅ Typical size reduction: 20MB → <1MB
+
+**Example:**
+- **Original**: 6000x4000px, 25MB → **Resized**: 1500x1000px, 0.8MB
+- **Original**: 9000x9000px, 18MB → **Resized**: 1500x1500px, 0.6MB
+
+**Implementation:**
+- **Chevalier**: `shopify_import_chevalier.py:35-148` (`resize_image()`, `prepare_image_for_shopify()`)
+- **Deerhunter**: `shopify_import_deerhunter.py:26-145` (`resize_image()`, `prepare_image_for_shopify()`)
 
 ### API Integration Points
 
@@ -267,17 +305,27 @@ GitHub Actions provides a 6-hour timeout for public repos. We use a 5h 50m timeo
 The workflow implements persistent caching to handle interruptions and avoid re-processing:
 
 #### Cache Files
-- **`chevalier_image_imported.json`**: Tracks which Chevalier product images have been uploaded
-- **`deerhunter_validation_cache.json`**: Caches validated Deerhunter images to skip re-validation
+- **`chevalier_image_imported.json`**: Tracks which Chevalier product images have been uploaded (prevents re-upload)
+- **`chevalier_validation_cache.json`**: Caches Chevalier image validation/resize results (prevents re-download/re-processing)
+- **`deerhunter_image_imported.json`**: Tracks which Deerhunter product images have been uploaded (prevents re-upload)
+- **`deerhunter_validation_cache.json`**: Caches Deerhunter image validation/resize results (prevents re-download/re-processing)
 - **`progress.txt`**: Tracks last successfully imported Deerhunter product for resume capability (automatically deleted after complete runs)
 
 #### How Caching Works
-1. **GitHub Actions Cache**: Uses `actions/cache@v3` to persist files between workflow runs
-2. **Resume on Failure**: If the workflow times out or fails:
+1. **GitHub Actions Cache**: Uses separate `actions/cache/restore` and `actions/cache/save` steps
+   - Cache key includes version (`v2`) to force fresh start when cache structure changes
+   - Increment version (e.g., `v2` → `v3`) to invalidate old caches after major changes
+   - **`if: always()`** on save step ensures cache is saved even on timeout/failure (critical for resuming!)
+2. **Timeout Handling**: If workflow times out (5h 50m limit):
+   - Cache is still saved with all processed images marked
+   - Next run restores cache and continues from where it left off
+   - Each run processes more images until complete
+   - Example: Run 1 (timeout at 350min, 60% done) → Run 2 (continues, finishes in 140min)
+3. **Resume on Failure**: If the workflow times out or fails:
    - Chevalier will skip already uploaded images (via JSON cache)
    - Deerhunter will resume from the last product in `progress.txt`
-3. **Automatic Cleanup**: `progress.txt` is automatically deleted when import completes (regardless of individual product failures)
-4. **Debug Artifacts**: On failure, all cache and log files are uploaded as artifacts for debugging
+4. **Automatic Cleanup**: `progress.txt` is automatically deleted when import completes (regardless of individual product failures)
+5. **Debug Artifacts**: On failure, all cache and log files are uploaded as artifacts for debugging
 
 Create `.github/workflows/shopify-import.yml`:
 
@@ -306,23 +354,25 @@ jobs:
 
       # Restore cache files from previous runs
       - name: Restore cache files
-        uses: actions/cache@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             chevalier_image_imported.json
+            chevalier_validation_cache.json
+            deerhunter_image_imported.json
             deerhunter_validation_cache.json
             progress.txt
-          key: shopify-cache-${{ github.run_number }}
+          key: shopify-cache-v2-${{ github.run_number }}
           restore-keys: |
-            shopify-cache-
+            shopify-cache-v2-
 
       - name: Run Chevalier Import
         env:
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
           SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
         run: python shopify_import_chevalier.py
-      
-      - name: Run Deerhunter Import  
+
+      - name: Run Deerhunter Import
         env:
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
           SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
@@ -331,6 +381,19 @@ jobs:
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           FTP_FILE_PATH: ${{ secrets.FTP_FILE_PATH }}
         run: python shopify_import_deerhunter.py
+
+      # Save cache even on timeout/failure (runs always)
+      - name: Save cache files
+        uses: actions/cache/save@v4
+        if: always()  # Run even if previous steps failed/timed out
+        with:
+          path: |
+            chevalier_image_imported.json
+            chevalier_validation_cache.json
+            deerhunter_image_imported.json
+            deerhunter_validation_cache.json
+            progress.txt
+          key: shopify-cache-v2-${{ github.run_number }}
 
       # Upload debug files on failure for troubleshooting
       - name: Upload debug files on failure
@@ -341,6 +404,8 @@ jobs:
           path: |
             *.log
             chevalier_image_imported.json
+            chevalier_validation_cache.json
+            deerhunter_image_imported.json
             deerhunter_validation_cache.json
             progress.txt
           retention-days: 7

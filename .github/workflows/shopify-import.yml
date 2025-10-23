@@ -27,16 +27,18 @@ jobs:
 
       # Restore cache files from previous runs
       - name: Restore cache files
-        uses: actions/cache@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             chevalier_image_imported.json
+            chevalier_validation_cache.json
+            deerhunter_image_imported.json
             deerhunter_validation_cache.json
             progress.txt
-          key: shopify-cache-${{ github.run_number }}
+          key: shopify-cache-v2-${{ github.run_number }}
           restore-keys: |
-            shopify-cache-
-      
+            shopify-cache-v2-
+
       - name: Run Chevalier Import
         env:
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
@@ -46,7 +48,7 @@ jobs:
           python shopify_import_chevalier.py
           echo "Chevalier import completed at $(date)"
       
-      - name: Run Deerhunter Import  
+      - name: Run Deerhunter Import
         env:
           SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
           SHOPIFY_STORE_URL: ${{ secrets.SHOPIFY_STORE_URL }}
@@ -58,7 +60,20 @@ jobs:
           echo "Starting Deerhunter import at $(date)"
           python shopify_import_deerhunter.py
           echo "Deerhunter import completed at $(date)"
-      
+
+      # Save cache even on timeout/failure (runs always)
+      - name: Save cache files
+        uses: actions/cache/save@v4
+        if: always()  # Run even if previous steps failed/timed out
+        with:
+          path: |
+            chevalier_image_imported.json
+            chevalier_validation_cache.json
+            deerhunter_image_imported.json
+            deerhunter_validation_cache.json
+            progress.txt
+          key: shopify-cache-v2-${{ github.run_number }}
+
       # Upload logs and cache files on failure for debugging
       - name: Upload debug files on failure
         if: failure()
@@ -68,6 +83,8 @@ jobs:
           path: |
             *.log
             chevalier_image_imported.json
+            chevalier_validation_cache.json
+            deerhunter_image_imported.json
             deerhunter_validation_cache.json
             progress.txt
           retention-days: 7

@@ -10,59 +10,168 @@ from dotenv import load_dotenv
 from PIL import Image  # Pillow för bildhantering
 import json
 from datetime import datetime
+import base64
 
 # Bildvaliderings-cache
-CACHE_FILE = "deerhunter_validation_cache.json"
-MAX_SIZE_MB = 20
-MAX_PIXELS = 5000
+IMAGE_IMPORTED_CACHE_FILE = "deerhunter_image_imported.json"
+VALIDATION_CACHE_FILE = "deerhunter_validation_cache.json"
+MAX_SIZE_MB = 16  # Google Shopping max (16MB)
+MAX_PIXELS = 8000  # Google Shopping max (64 megapixels ≈ 8000x8000)
+RESIZE_MAX_DIMENSION = 1500  # Google Shopping rekommendation (1500x1500)
 
-if os.path.exists(CACHE_FILE):
-    with open(CACHE_FILE, "r") as f:
+if os.path.exists(IMAGE_IMPORTED_CACHE_FILE):
+    with open(IMAGE_IMPORTED_CACHE_FILE, "r") as f:
+        image_import_cache = json.load(f)
+else:
+    image_import_cache = {}
+
+if os.path.exists(VALIDATION_CACHE_FILE):
+    with open(VALIDATION_CACHE_FILE, "r") as f:
         image_validation_cache = json.load(f)
 else:
     image_validation_cache = {}
 
-def is_valid_shopify_image(url):
-    if not url:
-        return False
-    if url in image_validation_cache:
-        return image_validation_cache[url]["valid"]
+def resize_image(image_data, max_dimension=RESIZE_MAX_DIMENSION):
+    """Resiza och optimera en bild till max dimension"""
     try:
-        head = requests.head(url, timeout=10)
-        if head.status_code != 200:
-            print(f"⚠️ HEAD misslyckades: {url}")
-            image_validation_cache[url] = {"valid": False}
-            return False
-        if 'Content-Length' in head.headers:
-            size_bytes = int(head.headers['Content-Length'])
-            if size_bytes > MAX_SIZE_MB * 1024 * 1024:
-                print(f"⚠️ Bild för stor enligt headers: {url} ({size_bytes/1024/1024:.1f} MB)")
-                image_validation_cache[url] = {"valid": False}
-                return False
-        # Om rimlig storlek, kontrollera dimensioner med GET
+        img = Image.open(BytesIO(image_data))
+
+        # Konvertera RGBA/LA/P till RGB (ta bort alpha channel)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            # Skapa vit bakgrund
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        # Resiza med bibehållen aspect ratio
+        img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+
+        # Spara optimerad som JPEG
+        output = BytesIO()
+        img.save(output, format='JPEG', quality=85, optimize=True)
+        output.seek(0)
+
+        return output.getvalue()
+    except Exception as e:
+        print(f"⚠️ Kunde inte resiza bild: {e}")
+        return None
+
+def prepare_image_for_shopify(url):
+    """
+    Hämtar och förbereder en bild för Shopify.
+    Returnerar:
+      - {"src": url} om bilden är OK som den är
+      - {"attachment": base64_data, "filename": filename} om bilden behövde resizas
+      - None om bilden inte kunde hanteras
+    """
+    if not url:
+        return None
+
+    # Kolla cache först
+    if url in image_validation_cache:
+        cache_entry = image_validation_cache[url]
+        if cache_entry.get("valid") and not cache_entry.get("resized"):
+            return {"src": url}
+        elif cache_entry.get("resized"):
+            # Behöver ladda om och resiza varje gång (vi cachar inte base64)
+            pass
+        elif not cache_entry.get("valid") and cache_entry.get("failed"):
+            return None
+
+    try:
+        # Försök hämta bilden
         resp = requests.get(url, timeout=20)
         if resp.status_code != 200:
             print(f"⚠️ Bild kunde inte hämtas: {url}")
-            image_validation_cache[url] = {"valid": False}
-            return False
-        img = Image.open(BytesIO(resp.content))
+            image_validation_cache[url] = {"valid": False, "failed": True}
+            return None
+
+        image_data = resp.content
+        img = Image.open(BytesIO(image_data))
         width, height = img.width, img.height
-        if width > MAX_PIXELS or height > MAX_PIXELS:
-            print(f"⚠️ Bild för stor i px: {url} ({width}x{height})")
-            image_validation_cache[url] = {"valid": False, "width": width, "height": height}
-            return False
-        image_validation_cache[url] = {"valid": True, "width": width, "height": height}
-        return True
+        size_mb = len(image_data) / (1024 * 1024)
+
+        # Kolla om bilden behöver resizas
+        needs_resize = (
+            size_mb > MAX_SIZE_MB or
+            width > MAX_PIXELS or
+            height > MAX_PIXELS
+        )
+
+        if needs_resize:
+            print(f"📐 Resizar bild: {url} ({width}x{height}, {size_mb:.1f}MB) → max {RESIZE_MAX_DIMENSION}x{RESIZE_MAX_DIMENSION}")
+            resized_data = resize_image(image_data)
+
+            if resized_data:
+                # Konvertera till base64 för Shopify attachment
+                base64_data = base64.b64encode(resized_data).decode('utf-8')
+
+                # Extrahera filnamn från URL
+                filename = os.path.basename(urllib.parse.urlparse(url).path)
+                if not filename.lower().endswith(('.jpg', '.jpeg')):
+                    filename = os.path.splitext(filename)[0] + '.jpg'
+
+                # Cacha att denna bild behöver resizas
+                image_validation_cache[url] = {
+                    "valid": True,
+                    "resized": True,
+                    "original_size": f"{width}x{height}",
+                    "original_mb": round(size_mb, 1)
+                }
+
+                return {
+                    "attachment": base64_data,
+                    "filename": filename
+                }
+            else:
+                print(f"⚠️ Kunde inte resiza bild: {url}")
+                image_validation_cache[url] = {"valid": False, "failed": True}
+                return None
+        else:
+            # Bilden är OK som den är
+            image_validation_cache[url] = {
+                "valid": True,
+                "width": width,
+                "height": height,
+                "size_mb": round(size_mb, 1)
+            }
+            return {"src": url}
+
     except Exception as e:
         print(f"⚠️ Bildproblem: {url} - {e}")
-        image_validation_cache[url] = {"valid": False}
-        return False
+        image_validation_cache[url] = {"valid": False, "failed": True}
+        return None
+
+def is_valid_shopify_image(url):
+    """Bakåtkompatibel wrapper - kollar om bilden kan användas"""
+    result = prepare_image_for_shopify(url)
+    return result is not None
+
+def is_image_imported(url):
+    return image_import_cache.get(url, False)
+
+def mark_image_imported(url):
+    image_import_cache[url] = True
+    with open(IMAGE_IMPORTED_CACHE_FILE, "w") as f:
+        json.dump(image_import_cache, f)
+
+def save_image_import_cache():
+    with open(IMAGE_IMPORTED_CACHE_FILE, "w") as f:
+        json.dump(image_import_cache, f)
+
+def save_validation_cache():
+    with open(VALIDATION_CACHE_FILE, "w") as f:
+        json.dump(image_validation_cache, f)
 
 import atexit
 @atexit.register
-def save_cache():
-    with open(CACHE_FILE, "w") as f:
-        json.dump(image_validation_cache, f)
+def save_all_caches():
+    save_image_import_cache()
+    save_validation_cache()
 
 # -------------------------------------------------------------
 
@@ -313,7 +422,7 @@ def transform_group_to_product(group):
         image_fields = ["Image_URL", "Image1", "Image2", "Image3", "Image4", "Image5", "Image6", "Image7"]
         for field in image_fields:
             url = row.get(field, "").strip()
-            if url and url not in image_urls:
+            if url and url not in image_urls and not is_image_imported(url):
                 if is_valid_shopify_image(url):
                     image_urls.add(url)
                 else:
@@ -337,7 +446,13 @@ def transform_group_to_product(group):
     primary_tag = f"handle:{handle}"
     all_tags = [primary_tag] + tags
     all_image_urls = list(image_urls)
-    images = [{"src": url} for url in all_image_urls[:1]]
+
+    # Förbered första bilden (kan vara resizad)
+    images = []
+    if all_image_urls:
+        first_image = prepare_image_for_shopify(all_image_urls[0])
+        if first_image:
+            images.append(first_image)
 
     product_payload = {
         "title": product_name,
@@ -399,8 +514,10 @@ def update_product(product_id, product_data):
             current_variants.append(new_var)
     current_images = current_product.get("images", [])
     for image in product_data.get("images", []):
-        src = image.get("src")
-        if src:
+        # Kan vara antingen {"src": url} eller {"attachment": ..., "filename": ...}
+        if image.get("src"):
+            # URL-baserad bild
+            src = image.get("src")
             base = get_base_without_hash(os.path.splitext(os.path.basename(src))[0])
             duplicate_found = any(
                 base == get_base_without_hash(os.path.splitext(os.path.basename(existing.get("src", "") or ""))[0])
@@ -408,6 +525,16 @@ def update_product(product_id, product_data):
             )
             if not duplicate_found:
                 current_images.append({"src": src})
+        elif image.get("attachment"):
+            # Resizad bild som attachment
+            filename = image.get("filename", "image.jpg")
+            base = get_base_without_hash(os.path.splitext(filename)[0])
+            duplicate_found = any(
+                base == get_base_without_hash(os.path.splitext(os.path.basename(existing.get("src", "") or ""))[0])
+                for existing in current_images
+            )
+            if not duplicate_found:
+                current_images.append(image)
     updated_data = {
         "id": product_id,
         "variants": current_variants,
@@ -531,6 +658,10 @@ def send_to_shopify(product_data):
             prod_id = None
             error_text = response.text
     if prod_id:
+        # Märk bilder som importerade (använd original-URLer)
+        for url in product_data.get("all_image_urls", []):
+            mark_image_imported(url)
+
         update_inventory_levels(prod_id, product_data)
         if "variant_image_map" in product_data:
             assign_variant_images(prod_id, product_data["variant_image_map"])
@@ -557,7 +688,14 @@ def upload_additional_images(product_id, image_urls):
         if base in uploaded_basenames:
             print(f"⏩ Skippade bild (fanns redan basnamn): {url}")
             continue
-        payload = {"image": {"src": url}}
+
+        # Förbered bilden (kan bli resizad)
+        image_data = prepare_image_for_shopify(url)
+        if not image_data:
+            print(f"❌ Kunde inte förbereda bild: {url}")
+            continue
+
+        payload = {"image": image_data}
         resp = requests.post(
             f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}/images.json",
             json=payload,
@@ -590,9 +728,9 @@ def get_existing_smart_collections():
         print(response.text)
         return {}
 
+# Deprecated - use save_all_caches() instead
 def save_image_cache():
-    with open(CACHE_FILE, "w") as f:
-        json.dump(image_validation_cache, f)
+    save_all_caches()
 
 def ensure_global_publication(product_id):
     """

@@ -7,14 +7,145 @@ import urllib.parse
 from dotenv import load_dotenv
 import re
 from datetime import datetime
+from PIL import Image
+from io import BytesIO
+import base64
 
-# ----- BILDIMPORT-CACHE -----
+# ----- BILDVALIDERINGS-CACHE -----
 CACHE_FILE = "chevalier_image_imported.json"
+VALIDATION_CACHE_FILE = "chevalier_validation_cache.json"
+
+# Bildvaliderings-gränser (Google Shopping-kompatibla)
+MAX_SIZE_MB = 16  # Google Shopping max (16MB)
+MAX_PIXELS = 8000  # Google Shopping max (64 megapixels ≈ 8000x8000)
+RESIZE_MAX_DIMENSION = 1500  # Google Shopping rekommendation (1500x1500)
+
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, "r") as f:
         image_import_cache = json.load(f)
 else:
     image_import_cache = {}
+
+if os.path.exists(VALIDATION_CACHE_FILE):
+    with open(VALIDATION_CACHE_FILE, "r") as f:
+        image_validation_cache = json.load(f)
+else:
+    image_validation_cache = {}
+
+def resize_image(image_data, max_dimension=RESIZE_MAX_DIMENSION):
+    """Resiza och optimera en bild till max dimension"""
+    try:
+        img = Image.open(BytesIO(image_data))
+
+        # Konvertera RGBA/LA/P till RGB (ta bort alpha channel)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            # Skapa vit bakgrund
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        # Resiza med bibehållen aspect ratio
+        img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+
+        # Spara optimerad som JPEG
+        output = BytesIO()
+        img.save(output, format='JPEG', quality=85, optimize=True)
+        output.seek(0)
+
+        return output.getvalue()
+    except Exception as e:
+        print(f"⚠️ Kunde inte resiza bild: {e}")
+        return None
+
+def prepare_image_for_shopify(url):
+    """
+    Hämtar och förbereder en bild för Shopify.
+    Returnerar:
+      - {"src": url} om bilden är OK som den är
+      - {"attachment": base64_data, "filename": filename} om bilden behövde resizas
+      - None om bilden inte kunde hanteras
+    """
+    if not url:
+        return None
+
+    # Kolla cache först
+    if url in image_validation_cache:
+        cache_entry = image_validation_cache[url]
+        if cache_entry.get("valid") and not cache_entry.get("resized"):
+            return {"src": url}
+        elif cache_entry.get("resized"):
+            # Behöver ladda om och resiza varje gång (vi cachar inte base64)
+            pass
+        elif not cache_entry.get("valid") and cache_entry.get("failed"):
+            return None
+
+    try:
+        # Försök hämta bilden
+        resp = requests.get(url, timeout=20)
+        if resp.status_code != 200:
+            print(f"⚠️ Bild kunde inte hämtas: {url}")
+            image_validation_cache[url] = {"valid": False, "failed": True}
+            return None
+
+        image_data = resp.content
+        img = Image.open(BytesIO(image_data))
+        width, height = img.width, img.height
+        size_mb = len(image_data) / (1024 * 1024)
+
+        # Kolla om bilden behöver resizas
+        needs_resize = (
+            size_mb > MAX_SIZE_MB or
+            width > MAX_PIXELS or
+            height > MAX_PIXELS
+        )
+
+        if needs_resize:
+            print(f"📐 Resizar bild: {url} ({width}x{height}, {size_mb:.1f}MB) → max {RESIZE_MAX_DIMENSION}x{RESIZE_MAX_DIMENSION}")
+            resized_data = resize_image(image_data)
+
+            if resized_data:
+                # Konvertera till base64 för Shopify attachment
+                base64_data = base64.b64encode(resized_data).decode('utf-8')
+
+                # Extrahera filnamn från URL
+                filename = os.path.basename(urllib.parse.urlparse(url).path)
+                if not filename.lower().endswith(('.jpg', '.jpeg')):
+                    filename = os.path.splitext(filename)[0] + '.jpg'
+
+                # Cacha att denna bild behöver resizas
+                image_validation_cache[url] = {
+                    "valid": True,
+                    "resized": True,
+                    "original_size": f"{width}x{height}",
+                    "original_mb": round(size_mb, 1)
+                }
+
+                return {
+                    "attachment": base64_data,
+                    "filename": filename
+                }
+            else:
+                print(f"⚠️ Kunde inte resiza bild: {url}")
+                image_validation_cache[url] = {"valid": False, "failed": True}
+                return None
+        else:
+            # Bilden är OK som den är
+            image_validation_cache[url] = {
+                "valid": True,
+                "width": width,
+                "height": height,
+                "size_mb": round(size_mb, 1)
+            }
+            return {"src": url}
+
+    except Exception as e:
+        print(f"⚠️ Bildproblem: {url} - {e}")
+        image_validation_cache[url] = {"valid": False, "failed": True}
+        return None
 
 def is_image_imported(url):
     return image_import_cache.get(url, False)
@@ -27,6 +158,16 @@ def mark_image_imported(url):
 def save_image_import_cache():
     with open(CACHE_FILE, "w") as f:
         json.dump(image_import_cache, f)
+
+def save_validation_cache():
+    with open(VALIDATION_CACHE_FILE, "w") as f:
+        json.dump(image_validation_cache, f)
+
+import atexit
+@atexit.register
+def save_all_caches():
+    save_image_import_cache()
+    save_validation_cache()
 
 # ----- RESTEN AV SCRIPTET -----
 load_dotenv()
@@ -258,6 +399,15 @@ def extract_group_product_data(products):
     all_tags = [primary_tag] + product_categories + sorted(gender_list)
     tags = ", ".join(all_tags)
 
+    # Förbered bilder (kan vara resizade)
+    images = []
+    original_urls = []  # Spara original-URLer för att märka som importerade
+    for url in image_urls:
+        image_data = prepare_image_for_shopify(url)
+        if image_data:
+            images.append(image_data)
+            original_urls.append(url)  # Spara original-URL
+
     product_data = {
         "title": title,
         "handle": handle,
@@ -266,7 +416,8 @@ def extract_group_product_data(products):
         "tags": tags,
         "options": options,
         "variants": variants,
-        "images": [{"src": url} for url in image_urls],
+        "images": images,
+        "original_image_urls": original_urls,  # Inkludera original-URLer
         "variant_image_map": variant_image_map,
         "published_scope": "global",
     }
@@ -321,8 +472,10 @@ def update_product(product_id, product_data):
 
     current_images = current_product.get("images", [])
     for image in product_data.get("images", []):
-        src = image.get("src")
-        if src:
+        # Kan vara antingen {"src": url} eller {"attachment": ..., "filename": ...}
+        if image.get("src"):
+            # URL-baserad bild
+            src = image.get("src")
             base = get_base_without_hash(os.path.splitext(os.path.basename(src))[0])
             duplicate_found = any(
                 base == get_base_without_hash(os.path.splitext(os.path.basename(existing_image.get("src", "") or ""))[0])
@@ -330,6 +483,16 @@ def update_product(product_id, product_data):
             )
             if not duplicate_found:
                 current_images.append({"src": src})
+        elif image.get("attachment"):
+            # Resizad bild som attachment
+            filename = image.get("filename", "image.jpg")
+            base = get_base_without_hash(os.path.splitext(filename)[0])
+            duplicate_found = any(
+                base == get_base_without_hash(os.path.splitext(os.path.basename(existing_image.get("src", "") or ""))[0])
+                for existing_image in current_images
+            )
+            if not duplicate_found:
+                current_images.append(image)
 
     updated_data = {
         "id": product_id,
@@ -473,9 +636,8 @@ def send_to_shopify(product_data):
             prod_id = None
 
     if prod_id:
-        # Märk bilder som importerade
-        for image in product_data.get("images", []):
-            url = image["src"]
+        # Märk bilder som importerade (använd original-URLer)
+        for url in product_data.get("original_image_urls", []):
             mark_image_imported(url)
 
         update_inventory_levels(prod_id, product_data)
