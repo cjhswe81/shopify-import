@@ -43,6 +43,45 @@ def get_identifier_from_xml_url(url):
     identifier, _ = os.path.splitext(basename)
     return identifier.lower()
 
+def get_base_without_hash(filename):
+    """
+    Remove hash/UUID suffixes from filenames.
+    Handles multiple formats:
+    - image_1_e450759a-fd73-4409-a7f2-6410c82dee8e -> image
+    - image_4f68b42b-9d99-41c0-ba7b-ee8caa2acee7 -> image
+    - image-123 -> image-123 (unchanged)
+    """
+    # Keep removing suffix parts that look like hashes/UUIDs
+    while True:
+        parts = filename.rsplit("_", 1)
+        if len(parts) == 2:
+            suffix = parts[1]
+            # UUID pattern: 8-4-4-4-12 (e.g., 4f68b42b-9d99-41c0-ba7b-ee8caa2acee7)
+            # Hash pattern: long alphanumeric string (>= 32 chars typically)
+            # Simple numeric: _1, _2, etc (handled separately)
+
+            # Check for UUID pattern (has 4 dashes and is 36 chars)
+            if "-" in suffix and len(suffix) >= 32:
+                dash_count = suffix.count("-")
+                # UUID has exactly 4 dashes
+                if dash_count >= 3:  # UUID or similar hash
+                    filename = parts[0]
+                    continue
+
+            # Check for simple hash (long alphanumeric, no dashes, >= 16 chars)
+            elif len(suffix) >= 16 and suffix.isalnum():
+                filename = parts[0]
+                continue
+
+            # Check for simple numeric suffix _1, _2, etc
+            elif suffix.isdigit() and len(suffix) <= 2:
+                filename = parts[0]
+                continue
+
+        break
+
+    return filename.lower()
+
 def create_handle(title):
     handle = title.lower()
     handle = re.sub(r"\.", "-", handle)
@@ -272,7 +311,8 @@ def update_product(product_id, product_data):
         new_sku = new_var.get("sku", "").strip().lower()
         if new_sku in current_map:
             current_map[new_sku]["price"] = new_var["price"]
-            current_map[new_sku]["inventory_quantity"] = new_var["inventory_quantity"]
+            # NOTE: inventory_quantity cannot be updated via Products API
+            # It will be updated separately via update_inventory_levels()
             current_map[new_sku]["barcode"] = new_var.get(
                 "barcode", current_map[new_sku].get("barcode", "")
             )
@@ -283,9 +323,9 @@ def update_product(product_id, product_data):
     for image in product_data.get("images", []):
         src = image.get("src")
         if src:
-            xml_identifier = get_identifier_from_xml_url(src)
+            base = get_base_without_hash(os.path.splitext(os.path.basename(src))[0])
             duplicate_found = any(
-                xml_identifier in existing_image.get("src", "").lower()
+                base == get_base_without_hash(os.path.splitext(os.path.basename(existing_image.get("src", "") or ""))[0])
                 for existing_image in current_images
             )
             if not duplicate_found:
@@ -365,13 +405,17 @@ def update_inventory_levels(product_id, product_data):
     locations_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/locations.json"
     loc_resp = requests.get(locations_url, headers=headers)
     if loc_resp.status_code != 200:
-        print(f"❌ Failed to fetch locations: {loc_resp.text}")
+        print(f"❌ CRITICAL: Failed to fetch locations for inventory update!")
+        print(f"   Status code: {loc_resp.status_code}")
+        print(f"   Error: {loc_resp.text}")
+        print(f"   ⚠️  Inventory levels will NOT be updated! Check API permissions (read_locations scope required)")
         return
     locations = loc_resp.json().get("locations", [])
     if not locations:
-        print("❌ No locations found!")
+        print("❌ CRITICAL: No locations found! Inventory levels will NOT be updated!")
         return
     location_id = locations[0]["id"]
+    print(f"📍 Using location ID: {location_id} for inventory updates")
 
     product_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
     prod_resp = requests.get(product_url, headers=headers)
@@ -437,7 +481,38 @@ def send_to_shopify(product_data):
         update_inventory_levels(prod_id, product_data)
         if "variant_image_map" in product_data:
             assign_variant_images(prod_id, product_data["variant_image_map"])
+        # Ensure product is published globally (visible on all sales channels)
+        ensure_global_publication(prod_id)
     return prod_id
+
+def ensure_global_publication(product_id):
+    """
+    Ensure product is published with global scope, making it visible on all sales channels
+    including Online Store, Google & YouTube, Facebook & Instagram, etc.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_API_KEY,
+    }
+
+    # Update product to have global published_scope
+    url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
+    payload = {
+        "product": {
+            "id": product_id,
+            "published_scope": "global",
+            "status": "active"
+        }
+    }
+
+    resp = requests.put(url, json=payload, headers=headers)
+
+    if resp.status_code == 200:
+        print(f"   📢 Product published globally (visible on all sales channels)")
+    else:
+        print(f"   ⚠️  Could not set global publication: {resp.status_code}")
+        if resp.text:
+            print(f"      Error: {resp.text}")
 
 def get_existing_smart_collections():
     headers = {

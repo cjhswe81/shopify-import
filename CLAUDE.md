@@ -60,7 +60,9 @@ python -i shopify_import_chevalier.py
 3. **Key Patterns**:
    - **Product Grouping**: Products are grouped by unique identifier before sending to Shopify
    - **Variant Management**: Each product can have multiple variants (color/size combinations)
-   - **Image Deduplication**: Cache systems prevent re-uploading the same images
+   - **Image Deduplication**: Advanced `get_base_without_hash()` removes Shopify UUID suffixes to prevent duplicates
+   - **Inventory Sync**: Uses Inventory Levels API to update stock quantities (requires `read_locations` scope)
+   - **Global Publication**: All products automatically published to all sales channels (Google, Facebook, etc.)
    - **Error Recovery**: Progress tracking allows resuming failed imports
 
 ### Shared Architecture Patterns
@@ -80,15 +82,44 @@ Both scripts follow similar patterns but with data source-specific implementatio
 | Data Source | XML from URL | CSV from FTP |
 | Image Validation | No | Yes (size/dimensions) |
 | Progress Resumption | No | Yes (progress.txt) |
-| Price Handling | Standard | Supports outlet pricing |
+| Price Handling | Standard | Dynamic outlet pricing |
 | Cache File | chevalier_image_imported.json | deerhunter_validation_cache.json |
+
+### Deerhunter Dynamic Outlet Pricing (Updated 2025-09-27)
+
+The Deerhunter script implements dynamic outlet pricing based on wholesale/retail margins:
+
+**Pricing Logic for Outlet Products:**
+- Calculates cost ratio: `wholesale_price / retail_price`
+- Applies dynamic multipliers based on margin:
+  - **<20% cost ratio** (very high margin): 2.5x wholesale (150% profit)
+  - **<30% cost ratio** (high margin): 2.2x wholesale (120% profit)
+  - **<40% cost ratio** (medium margin): 2.0x wholesale (100% profit)
+  - **≥40% cost ratio** (low margin): 1.8x wholesale (80% profit)
+- Maximum discount capped at 30% (never below 70% of retail price)
+- Non-outlet products remain at full retail price
+
+**Example Price Calculations:**
+- Product with 13% cost ratio (e.g., Sneaky 3D): 151.8 SEK wholesale → 380 SEK outlet price (67% discount!)
+- Product with 29% cost ratio: 619 SEK wholesale → 1362 SEK outlet price (37% discount)
+- Product with 45% cost ratio: 784 SEK wholesale → 1225 SEK outlet price (30% max discount)
+
+This strategy optimizes for competitive Google Shopping placement while maintaining profitability.
 
 ### API Integration Points
 
-1. **Products API**: `/admin/api/2023-10/products.json`
-2. **Product Images API**: `/admin/api/2023-10/products/{id}/images.json`
-3. **Inventory API**: `/admin/api/2023-10/inventory_levels/set.json`
-4. **Smart Collections API**: `/admin/api/2023-10/smart_collections.json`
+1. **Products API**: `/admin/api/2023-04/products.json`
+   - Create and update products
+   - Set `published_scope: "global"` for visibility on all sales channels
+2. **Product Images API**: `/admin/api/2023-04/products/{id}/images.json`
+   - Upload product images
+   - Image deduplication via `get_base_without_hash()` function
+3. **Inventory Levels API**: `/admin/api/2023-04/inventory_levels/set.json`
+   - Update inventory quantities (requires `read_locations` scope)
+   - Called via `update_inventory_levels()` function
+4. **Smart Collections API**: `/admin/api/2023-04/smart_collections.json`
+5. **Locations API**: `/admin/api/2023-04/locations.json`
+   - Fetch store location for inventory updates
 
 ### Environment Configuration
 
@@ -104,6 +135,101 @@ FTP_PASSWORD=password
 FTP_FILE_PATH=/path/to/csv/file.csv
 ```
 
+### Required API Permissions (Scopes)
+
+The Shopify API key must have the following scopes enabled:
+
+**Essential Scopes:**
+- ✅ `read_products` - Read product data
+- ✅ `write_products` - Create and update products
+- ✅ `write_inventory` - Update inventory levels
+- ✅ `read_locations` - Required for inventory updates (fetch store location)
+
+**Optional but Recommended:**
+- ✅ `read_publications` - Read sales channel information
+- ✅ `write_publications` - Publish products to sales channels (not currently used)
+
+**How to add scopes:**
+1. Go to Shopify Admin → Settings → Apps and sales channels → Develop apps
+2. Click on your app (or create one)
+3. Under "Admin API access scopes", enable the scopes listed above
+4. Save and reinstall app to apply changes
+5. Copy the new API key to `.env` file
+
+### Key Features and Fixes (Updated 2025-10-23)
+
+#### 1. Inventory Sync (Fixed)
+**Problem:** Inventory levels were not syncing from supplier feeds to Shopify.
+
+**Root Cause:**
+- API key lacked `read_locations` scope
+- Script attempted to update inventory via Products API (doesn't work for existing products)
+
+**Solution:**
+- Added `read_locations` scope to API key
+- Use Inventory Levels API (`/admin/api/2023-04/inventory_levels/set.json`)
+- Implemented `update_inventory_levels()` function with proper error logging
+- Removed incorrect `inventory_quantity` update in `update_product()` function
+
+**Location:** `shopify_import_deerhunter.py:426-510`, `shopify_import_chevalier.py:360-453`
+
+#### 2. Image Deduplication (Fixed)
+**Problem:** Some products had 250+ duplicate images (Shopify's max limit).
+
+**Root Cause:**
+- Shopify adds UUID suffixes to uploaded images (e.g., `image_4f68b42b-9d99-41c0.jpg`)
+- Original `get_base_without_hash()` couldn't handle multiple suffixes or numeric variants
+- Example: `D_M_F_3733-642_1_e450759a-fd73-4409.jpg` was treated as different from `D_M_F_3733-642.jpg`
+
+**Solution:**
+- Improved `get_base_without_hash()` function to:
+  - Remove Shopify UUID suffixes (36 chars with 4+ dashes)
+  - Remove long alphanumeric hashes (≥16 chars)
+  - Remove numeric suffixes (_1, _2, etc.) from suppliers
+  - Preserve product codes with dashes (e.g., 3733-642)
+- Loop removes multiple suffix layers until base filename is found
+
+**Example:**
+```python
+# Before fix:
+"D_M_F_3733-642_1_e450759a-fd73-4409-a7f2" → "d_m_f" (incorrect!)
+
+# After fix:
+"D_M_F_3733-642_1_e450759a-fd73-4409-a7f2" → "d_m_f_3733-642" (correct!)
+"D_M_F_3733-642_4f68b42b-9d99-41c0"       → "d_m_f_3733-642" (correct!)
+"D_M_F_3733-642"                           → "d_m_f_3733-642" (correct!)
+```
+
+**Location:** `shopify_import_deerhunter.py:145-182`, `shopify_import_chevalier.py:46-83`
+
+#### 3. Automatic Sales Channel Publication (New Feature)
+**Feature:** Automatically publish products to all sales channels (Google & YouTube, Facebook & Instagram, etc.)
+
+**Implementation:**
+- New `ensure_global_publication()` function
+- Sets `published_scope: "global"` on all products
+- Makes products visible on:
+  - Online Store
+  - Point of Sale
+  - Google & YouTube (Google Shopping)
+  - Facebook & Instagram
+- Simple, reliable method (single API call)
+
+**Benefits:**
+- No manual work needed to publish products
+- Products automatically appear in Google Shopping feed
+- Facebook/Instagram catalog automatically updated
+- Works for both new and existing products
+
+**Location:** `shopify_import_deerhunter.py:597-624`, `shopify_import_chevalier.py:488-515`
+
+#### 4. Enhanced Error Logging
+**Improvements:**
+- Clear warnings if `read_locations` scope is missing
+- Logs location_id being used for inventory updates
+- Better error messages for debugging API issues
+- Critical errors clearly marked with ❌ and ⚠️ symbols
+
 ### Common Development Tasks
 
 1. **Adding New Data Source**: Copy existing script structure, modify parsing logic
@@ -113,10 +239,18 @@ FTP_FILE_PATH=/path/to/csv/file.csv
 
 ### Error Handling Considerations
 
-- Always check for 429 (rate limit) errors from Shopify API
-- Validate required fields before sending to API
-- Use cache files to avoid duplicate processing
-- Implement progress tracking for long-running imports
+- **Rate Limiting**: Always check for 429 errors from Shopify API
+- **Field Validation**: Validate required fields before sending to API
+- **Cache Management**: Use cache files to avoid duplicate processing
+- **Progress Tracking**: Implement resume capability for long-running imports
+- **API Permissions**: Script logs clear warnings if required scopes are missing
+  - Look for "CRITICAL" messages in logs
+  - Check for `read_locations` scope if inventory not updating
+- **Image Deduplication**: Monitor for products with excessive images (>50)
+  - Use `get_base_without_hash()` to normalize filenames
+  - Check logs for "⏩ Skippade bild" messages
+- **Publication Status**: Verify `published_scope: "global"` is set on products
+  - Check logs for "📢 Product published globally" messages
 
 ## Automation with GitHub Actions
 

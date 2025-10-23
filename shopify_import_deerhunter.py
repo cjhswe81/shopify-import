@@ -143,10 +143,43 @@ def group_products(rows):
     return groups
 
 def get_base_without_hash(filename):
-    parts = filename.rsplit("_", 1)
-    if len(parts) == 2 and (len(parts[1]) >= 8 and (parts[1].replace("-", "").isalnum() or "-" in parts[1])):
-        return parts[0]
-    return filename
+    """
+    Remove hash/UUID suffixes from filenames.
+    Handles multiple formats:
+    - D_M_F_3733-642_1_e450759a-fd73-4409-a7f2-6410c82dee8e -> d_m_f_3733-642
+    - D_M_F_3733-642_4f68b42b-9d99-41c0-ba7b-ee8caa2acee7 -> d_m_f_3733-642
+    - D_M_F_3733-642 -> d_m_f_3733-642 (unchanged)
+    """
+    # Keep removing suffix parts that look like hashes/UUIDs
+    while True:
+        parts = filename.rsplit("_", 1)
+        if len(parts) == 2:
+            suffix = parts[1]
+            # UUID pattern: 8-4-4-4-12 (e.g., 4f68b42b-9d99-41c0-ba7b-ee8caa2acee7)
+            # Hash pattern: long alphanumeric string (>= 32 chars typically)
+            # Simple numeric: _1, _2, etc (handled separately)
+
+            # Check for UUID pattern (has 4 dashes and is 36 chars)
+            if "-" in suffix and len(suffix) >= 32:
+                dash_count = suffix.count("-")
+                # UUID has exactly 4 dashes
+                if dash_count >= 3:  # UUID or similar hash
+                    filename = parts[0]
+                    continue
+
+            # Check for simple hash (long alphanumeric, no dashes, >= 16 chars)
+            elif len(suffix) >= 16 and suffix.isalnum():
+                filename = parts[0]
+                continue
+
+            # Check for simple numeric suffix _1, _2, etc
+            elif suffix.isdigit() and len(suffix) <= 2:
+                filename = parts[0]
+                continue
+
+        break
+
+    return filename.lower()
 
 def transform_group_to_product(group):
     first = group[0]
@@ -357,7 +390,8 @@ def update_product(product_id, product_data):
                 current_map[new_sku]["compare_at_price"] = new_var["compare_at_price"]
             else:
                 current_map[new_sku].pop("compare_at_price", None)
-            current_map[new_sku]["inventory_quantity"] = new_var["inventory_quantity"]
+            # NOTE: inventory_quantity cannot be updated via Products API
+            # It will be updated separately via update_inventory_levels()
             current_map[new_sku]["barcode"] = new_var.get("barcode", current_map[new_sku].get("barcode", ""))
             current_map[new_sku]["inventory_management"] = "shopify"
             current_map[new_sku]["inventory_policy"] = "deny"
@@ -367,9 +401,9 @@ def update_product(product_id, product_data):
     for image in product_data.get("images", []):
         src = image.get("src")
         if src:
-            base = get_base_without_hash(os.path.splitext(os.path.basename(src))[0]).lower()
+            base = get_base_without_hash(os.path.splitext(os.path.basename(src))[0])
             duplicate_found = any(
-                base == get_base_without_hash(os.path.splitext(os.path.basename(existing.get("src", "") or ""))[0]).lower()
+                base == get_base_without_hash(os.path.splitext(os.path.basename(existing.get("src", "") or ""))[0])
                 for existing in current_images
             )
             if not duplicate_found:
@@ -403,7 +437,7 @@ def assign_variant_images(product_id, variant_image_map):
     image_mapping = {}
     for img in product_data.get("images", []):
         src = img.get("src", "")
-        base = get_base_without_hash(os.path.splitext(os.path.basename(src))[0]).lower()
+        base = get_base_without_hash(os.path.splitext(os.path.basename(src))[0])
         image_mapping[base] = img.get("id")
     updated_variants = []
     for variant in product_data.get("variants", []):
@@ -413,7 +447,7 @@ def assign_variant_images(product_id, variant_image_map):
         if assigned_image_url:
             feed_identifier = get_base_without_hash(
                 os.path.splitext(os.path.basename(urllib.parse.urlparse(assigned_image_url).path))[0]
-            ).lower()
+            )
             found_image_id = image_mapping.get(feed_identifier)
             if found_image_id:
                 variant["image_id"] = found_image_id
@@ -431,13 +465,17 @@ def update_inventory_levels(product_id, product_data):
     locations_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/locations.json"
     loc_resp = requests.get(locations_url, headers=headers)
     if loc_resp.status_code != 200:
-        print(f"❌ Failed to fetch locations: {loc_resp.text}")
+        print(f"❌ CRITICAL: Failed to fetch locations for inventory update!")
+        print(f"   Status code: {loc_resp.status_code}")
+        print(f"   Error: {loc_resp.text}")
+        print(f"   ⚠️  Inventory levels will NOT be updated! Check API permissions (read_locations scope required)")
         return
     locations = loc_resp.json().get("locations", [])
     if not locations:
-        print("❌ No locations found!")
+        print("❌ CRITICAL: No locations found! Inventory levels will NOT be updated!")
         return
     location_id = locations[0]["id"]
+    print(f"📍 Using location ID: {location_id} for inventory updates")
     product_url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
     prod_resp = requests.get(product_url, headers=headers)
     if prod_resp.status_code != 200:
@@ -496,6 +534,8 @@ def send_to_shopify(product_data):
         update_inventory_levels(prod_id, product_data)
         if "variant_image_map" in product_data:
             assign_variant_images(prod_id, product_data["variant_image_map"])
+        # Ensure product is published globally (visible on all sales channels)
+        ensure_global_publication(prod_id)
     return prod_id, error_text
 
 def upload_additional_images(product_id, image_urls):
@@ -509,11 +549,11 @@ def upload_additional_images(product_id, image_urls):
     if resp.status_code == 200:
         for img in resp.json().get("images", []):
             filename = os.path.splitext(os.path.basename(img.get("src", "")))[0]
-            base = get_base_without_hash(filename).lower()
+            base = get_base_without_hash(filename)
             uploaded_basenames.add(base)
     for url in image_urls[1:]:
         filename = os.path.splitext(os.path.basename(urllib.parse.urlparse(url).path))[0]
-        base = get_base_without_hash(filename).lower()
+        base = get_base_without_hash(filename)
         if base in uploaded_basenames:
             print(f"⏩ Skippade bild (fanns redan basnamn): {url}")
             continue
@@ -553,7 +593,36 @@ def get_existing_smart_collections():
 def save_image_cache():
     with open(CACHE_FILE, "w") as f:
         json.dump(image_validation_cache, f)
-        
+
+def ensure_global_publication(product_id):
+    """
+    Ensure product is published with global scope, making it visible on all sales channels
+    including Online Store, Google & YouTube, Facebook & Instagram, etc.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_API_KEY,
+    }
+
+    # Update product to have global published_scope
+    url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
+    payload = {
+        "product": {
+            "id": product_id,
+            "published_scope": "global",
+            "status": "active"
+        }
+    }
+
+    resp = requests.put(url, json=payload, headers=headers)
+
+    if resp.status_code == 200:
+        print(f"   📢 Product published globally (visible on all sales channels)")
+    else:
+        print(f"   ⚠️  Could not set global publication: {resp.status_code}")
+        if resp.text:
+            print(f"      Error: {resp.text}")
+
 def main():
     start_time = datetime.now()
     print(f"🕐 Script started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
