@@ -676,6 +676,118 @@ def ensure_global_publication(product_id):
         if resp.text:
             print(f"      Error: {resp.text}")
 
+def get_all_chevalier_products_from_shopify():
+    """
+    Fetch all Chevalier products from Shopify.
+    Returns a dict with handle as key and product data as value.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_API_KEY,
+    }
+
+    all_products = {}
+    url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products.json?vendor=Chevalier&limit=250"
+
+    while url:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            print(f"❌ Failed to fetch Chevalier products from Shopify: {resp.status_code}")
+            print(resp.text)
+            break
+
+        data = resp.json()
+        products = data.get("products", [])
+
+        for product in products:
+            handle = product.get("handle")
+            if handle:
+                all_products[handle] = {
+                    "id": product.get("id"),
+                    "title": product.get("title"),
+                    "status": product.get("status")
+                }
+
+        # Check for pagination (Link header)
+        link_header = resp.headers.get("Link", "")
+        url = None
+        if "rel=\"next\"" in link_header:
+            # Extract next URL from Link header
+            parts = link_header.split(",")
+            for part in parts:
+                if "rel=\"next\"" in part:
+                    url = part.split(";")[0].strip("<> ")
+                    break
+
+        time.sleep(0.5)  # Rate limiting
+
+    return all_products
+
+def archive_products_not_in_feed(feed_handles, min_feed_size=200):
+    """
+    Archive (set to draft) Chevalier products that exist on Shopify but not in XML feed.
+
+    Safety checks:
+    - Only runs if feed has minimum number of products (default 200)
+    - Logs all archived products
+    - Does not delete, only sets status to "draft"
+    """
+    if len(feed_handles) < min_feed_size:
+        print(f"\n⚠️ SAFETY CHECK: Feed only has {len(feed_handles)} products (minimum {min_feed_size} required)")
+        print("   Skipping auto-cleanup to prevent accidental archiving due to feed issues")
+        return
+
+    print(f"\n🔍 Checking for products to archive...")
+    print(f"   Feed has {len(feed_handles)} products")
+
+    shopify_products = get_all_chevalier_products_from_shopify()
+    print(f"   Shopify has {len(shopify_products)} Chevalier products")
+
+    # Find products on Shopify but not in feed
+    to_archive = []
+    for handle, product_data in shopify_products.items():
+        if handle not in feed_handles and product_data["status"] == "active":
+            to_archive.append((handle, product_data))
+
+    if not to_archive:
+        print("   ✅ No products need archiving - all Shopify products are in feed")
+        return
+
+    print(f"\n📦 Found {len(to_archive)} products to archive:")
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_API_KEY,
+    }
+
+    archived_count = 0
+    for handle, product_data in to_archive:
+        product_id = product_data["id"]
+        title = product_data["title"]
+
+        print(f"   📥 Archiving: {title} (handle: {handle})")
+
+        url = f"https://{SHOPIFY_STORE_URL}/admin/api/2023-04/products/{product_id}.json"
+        payload = {
+            "product": {
+                "id": product_id,
+                "status": "draft"
+            }
+        }
+
+        resp = requests.put(url, json=payload, headers=headers)
+        if resp.status_code == 200:
+            print(f"      ✅ Archived successfully")
+            archived_count += 1
+        else:
+            print(f"      ❌ Failed to archive: {resp.status_code}")
+            if resp.text:
+                print(f"         Error: {resp.text}")
+
+        time.sleep(0.6)  # Rate limiting
+
+    print(f"\n✅ Auto-cleanup complete: {archived_count}/{len(to_archive)} products archived")
+
 def get_existing_smart_collections():
     headers = {
         "Content-Type": "application/json",
@@ -723,9 +835,13 @@ print(f"Found {len(grouped_products_list)} product groups from XML.")
 
 imported_product_ids = []
 unique_tags = set()
+feed_handles = set()  # Track all handles from XML feed for cleanup
 for i, group in enumerate(grouped_products_list, 1):
     print(f"\n📦 Processing product {i}/{len(grouped_products_list)}...")
     product_data = extract_group_product_data(group)
+
+    # Samla handle från feedet för cleanup
+    feed_handles.add(product_data.get("handle"))
 
     # Samla unika tags medan vi processar
     tags_str = product_data.get("tags", "")
@@ -752,6 +868,9 @@ for tag in unique_tags:
         print(
             f"Smart collection '{tag}' already exists (ID: {existing_collections[tag]})"
         )
+
+# Auto-cleanup: Archive products not in XML feed anymore
+archive_products_not_in_feed(feed_handles)
 
 # Calculate and display execution time
 end_time = datetime.now()
