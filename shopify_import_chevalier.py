@@ -835,13 +835,24 @@ print(f"Found {len(grouped_products_list)} product groups from XML.")
 
 imported_product_ids = []
 unique_tags = set()
-feed_handles = set()  # Track all handles from XML feed for cleanup
+
+# Collect ALL handles from feed for cleanup
+# Extract handles directly without building full payload to avoid image processing
+feed_handles = set()
+print("🔍 Collecting product handles from feed for cleanup...")
+for group in grouped_products_list:
+    if group:
+        first = group[0]
+        title_elem = first.find("name")
+        if title_elem is not None and title_elem.text:
+            title = title_elem.text.strip()
+            handle = create_handle(title)
+            feed_handles.add(handle)
+print(f"   Found {len(feed_handles)} unique products in feed")
+
 for i, group in enumerate(grouped_products_list, 1):
     print(f"\n📦 Processing product {i}/{len(grouped_products_list)}...")
     product_data = extract_group_product_data(group)
-
-    # Samla handle från feedet för cleanup
-    feed_handles.add(product_data.get("handle"))
 
     # Samla unika tags medan vi processar
     tags_str = product_data.get("tags", "")

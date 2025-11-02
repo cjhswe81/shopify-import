@@ -892,12 +892,16 @@ def main():
     failed_imports = []
 
     # Collect ALL handles from feed for cleanup (even if skipping/resuming)
+    # Extract handles directly without building full payload to avoid image processing
     feed_handles = set()
     print("🔍 Collecting product handles from feed for cleanup...")
     for product_number, group in groups.items():
-        product_payload = transform_group_to_product(group)
-        if product_payload:
-            feed_handles.add(product_payload.get("handle"))
+        if group:
+            first_row = group[0]
+            product_name = first_row.get("Product_Name", "").strip()
+            if product_name:
+                handle = create_handle(product_name)
+                feed_handles.add(handle)
     print(f"   Found {len(feed_handles)} unique products in feed")
 
     last_completed_product = None
