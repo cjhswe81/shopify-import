@@ -225,6 +225,8 @@ def get_base_without_hash(filename):
 
 def create_handle(title):
     handle = title.lower()
+    # Normalize Swedish characters to match Shopify's ASCII conversion
+    handle = handle.replace("å", "a").replace("ä", "a").replace("ö", "o")
     handle = re.sub(r"\.", "-", handle)
     handle = re.sub(r"[^\w\s-]", "", handle)
     handle = re.sub(r"\s+", "-", handle.strip())
@@ -743,10 +745,16 @@ def archive_products_not_in_feed(feed_handles, min_feed_size=200):
     shopify_products = get_all_chevalier_products_from_shopify()
     print(f"   Shopify has {len(shopify_products)} Chevalier products")
 
+    # Normalize both sets of handles for comparison (Shopify may normalize Swedish characters)
+    # Create normalized version of feed_handles
+    feed_handles_normalized = {h.replace("å", "a").replace("ä", "a").replace("ö", "o") for h in feed_handles}
+
     # Find products on Shopify but not in feed
     to_archive = []
     for handle, product_data in shopify_products.items():
-        if handle not in feed_handles and product_data["status"] == "active":
+        # Normalize Shopify handle for comparison
+        handle_normalized = handle.replace("å", "a").replace("ä", "a").replace("ö", "o")
+        if handle_normalized not in feed_handles_normalized and product_data["status"] == "active":
             to_archive.append((handle, product_data))
 
     if not to_archive:
