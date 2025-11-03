@@ -83,7 +83,8 @@ Both scripts follow similar patterns but with data source-specific implementatio
 | Image Validation | Yes (size/dimensions/resize) | Yes (size/dimensions/resize) |
 | Image Resizing | Yes (auto-resize to 1500x1500) | Yes (auto-resize to 1500x1500) |
 | Progress Resumption | No | Yes (progress.txt) |
-| Price Handling | Standard | Dynamic outlet pricing |
+| Price Handling | Uses `discounted-price-with-vat` from feed if available | Dynamic outlet pricing with calculated discounts |
+| Auto-Cleanup | Yes (archives discontinued products) | Yes (archives discontinued products) |
 | Cache Files | chevalier_image_imported.json<br>chevalier_validation_cache.json | deerhunter_image_imported.json<br>deerhunter_validation_cache.json |
 
 ### Deerhunter Dynamic Outlet Pricing (Updated 2025-09-27)
@@ -106,6 +107,37 @@ The Deerhunter script implements dynamic outlet pricing based on wholesale/retai
 - Product with 45% cost ratio: 784 SEK wholesale → 1225 SEK outlet price (30% max discount)
 
 This strategy optimizes for competitive Google Shopping placement while maintaining profitability.
+
+### Chevalier Discount Pricing (Updated 2025-11-02)
+
+The Chevalier script uses discounted prices directly from the XML feed when available:
+
+**Pricing Logic:**
+- Checks for `<discounted-price-with-vat>` in XML feed
+- If discount price exists:
+  - **price** = discounted price (e.g., 1649.50 SEK)
+  - **compare_at_price** = original price (e.g., 3299.00 SEK)
+  - Displays as "Was 3299 kr, Now 1649 kr" in store
+- If no discount price:
+  - **price** = regular price from `<price-with-vat>`
+  - **compare_at_price** = not set
+
+**Key Differences from Deerhunter:**
+- ✅ No dynamic price calculations (uses feed prices directly)
+- ✅ Simple, transparent pricing from supplier
+- ✅ Discounts determined by Chevalier, not calculated by script
+- ✅ Both new and updated products handle compare_at_price correctly
+
+**Implementation:**
+- Variant creation: `shopify_import_chevalier.py:353-397`
+- Variant updates: `shopify_import_chevalier.py:483-499` (removes compare_at_price when discount ends)
+
+**Example from XML:**
+```xml
+<price-with-vat>3299,00</price-with-vat>
+<discounted-price-with-vat>1649,50</discounted-price-with-vat>
+```
+Result: Product shows 50% discount (1649 kr, down from 3299 kr)
 
 ### Automatic Image Resizing (Updated 2025-10-23)
 
@@ -268,6 +300,62 @@ The Shopify API key must have the following scopes enabled:
 - Better error messages for debugging API issues
 - Critical errors clearly marked with ❌ and ⚠️ symbols
 
+#### 5. Automatic Product Cleanup (New Feature - Updated 2025-11-02)
+**Feature:** Automatically archive products that are no longer in supplier feeds
+
+**How It Works:**
+1. **Before Import**: Collect all product handles from feed (fast, no image processing)
+2. **After Import**: Fetch all products from Shopify for the vendor
+3. **Comparison**: Normalize Swedish characters (å/ä/ö → a/a/o) for accurate matching
+4. **Archiving**: Products in Shopify but not in feed are set to "draft" status
+
+**Safety Features:**
+- **Minimum Product Count Check**:
+  - Chevalier: Requires ≥200 products in feed
+  - Deerhunter: Requires ≥400 products in feed
+  - Prevents mass-archiving if feed is broken/incomplete
+- **Non-Destructive**: Sets status to "draft" (not deleted)
+  - Preserves product data, images, and order history
+  - Easy to reactivate if needed
+- **Detailed Logging**: Lists every product archived with handle
+
+**Swedish Character Handling:**
+```python
+# Problem: Shopify may return handles with or without Swedish characters
+# Solution: Normalize both sides for comparison
+
+# Feed handle: "lady-ann-extreme-väst"
+# Shopify handle: "lady-ann-extreme-väst" or "lady-ann-extreme-vast"
+# Comparison: Both normalized to "lady-ann-extreme-vast" → Match! ✅
+```
+
+**Performance:**
+- Handle collection: ~5-10 seconds
+- Shopify fetch: ~30 seconds (with pagination)
+- Archiving: ~0.6 sec per product
+- Total: ~1-2 minutes for typical cleanup
+
+**Implementation:**
+- Chevalier: `shopify_import_chevalier.py:679-790` (get_all_chevalier_products_from_shopify, archive_products_not_in_feed)
+- Deerhunter: `shopify_import_deerhunter.py:770-881` (get_all_deerhunter_products_from_shopify, archive_products_not_in_feed)
+- Handle collection: Optimized to avoid image processing (rad 839-851 Chevalier, 894-905 Deerhunter)
+
+**Example Output:**
+```
+🔍 Checking for products to archive...
+   Feed has 505 products
+   Shopify has 510 Deerhunter products
+
+📦 Found 5 products to archive:
+   📥 Archiving: Old Product Name (handle: old-product-name)
+      ✅ Archived successfully
+
+✅ Auto-cleanup complete: 5/5 products archived
+```
+
+**When NOT to Archive:**
+Products with 0 stock remain active (unlike old behavior where they'd be archived). This allows products to be replenished without manual reactivation.
+
 ### Common Development Tasks
 
 1. **Adding New Data Source**: Copy existing script structure, modify parsing logic
@@ -289,6 +377,10 @@ The Shopify API key must have the following scopes enabled:
   - Check logs for "⏩ Skippade bild" messages
 - **Publication Status**: Verify `published_scope: "global"` is set on products
   - Check logs for "📢 Product published globally" messages
+- **Auto-Cleanup**: Products removed from feed are automatically archived
+  - Check logs for "🔍 Checking for products to archive..." section
+  - If cleanup is skipped, verify feed has minimum products (200/400)
+  - Archived products can be manually reactivated in Shopify Admin if needed
 
 ## Automation with GitHub Actions
 

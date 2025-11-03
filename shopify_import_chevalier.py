@@ -350,16 +350,31 @@ def extract_group_product_data(products):
             else ""
         )
 
+        # Price handling: Use discounted price if available, otherwise regular price
+        discounted_price_elem = prod.find("discounted-price-with-vat")
+        regular_price_elem = prod.find("price-with-vat")
+
+        if discounted_price_elem is not None and discounted_price_elem.text:
+            # Product is on sale - use discounted price and show original as compare_at_price
+            price = discounted_price_elem.text.replace(",", ".").strip()
+            compare_at_price = (
+                regular_price_elem.text.replace(",", ".").strip()
+                if regular_price_elem is not None and regular_price_elem.text
+                else None
+            )
+        elif regular_price_elem is not None and regular_price_elem.text:
+            # Regular price, no discount
+            price = regular_price_elem.text.replace(",", ".").strip()
+            compare_at_price = None
+        else:
+            price = "0.00"
+            compare_at_price = None
+
         variant = {
             "sku": sku,
             "option1": color,
             "option2": size,
-            "price": (
-                prod.find("price-with-vat").text.replace(",", ".").strip()
-                if prod.find("price-with-vat") is not None
-                and prod.find("price-with-vat").text
-                else "0.00"
-            ),
+            "price": price,
             "barcode": (
                 prod.find("gtin-ean").text.strip()
                 if prod.find("gtin-ean") is not None and prod.find("gtin-ean").text
@@ -374,6 +389,11 @@ def extract_group_product_data(products):
             "inventory_management": "shopify",
             "inventory_policy": "deny",
         }
+
+        # Add compare_at_price only if product is on sale
+        if compare_at_price:
+            variant["compare_at_price"] = compare_at_price
+
         variants.append(variant)
 
         images = prod.findall("images/image")
@@ -464,6 +484,12 @@ def update_product(product_id, product_data):
         new_sku = new_var.get("sku", "").strip().lower()
         if new_sku in current_map:
             current_map[new_sku]["price"] = new_var["price"]
+            # Handle compare_at_price (for discounted products)
+            if "compare_at_price" in new_var and new_var["compare_at_price"]:
+                current_map[new_sku]["compare_at_price"] = new_var["compare_at_price"]
+            else:
+                # Remove compare_at_price if product is no longer on sale
+                current_map[new_sku].pop("compare_at_price", None)
             # NOTE: inventory_quantity cannot be updated via Products API
             # It will be updated separately via update_inventory_levels()
             current_map[new_sku]["barcode"] = new_var.get(
