@@ -325,6 +325,8 @@ def transform_group_to_product(group):
         tags.append("Mössor och Kepsar")
     if "piké" in name_lower:
         tags.append("Pike")
+    if "bag" in name_lower:
+        tags.append("Väskor")
     if "strumpor" in name_lower or "sockor" in name_lower or "socks" in name_lower:
         tags.append("Strumpor")
     if "handske" in name_lower or "vante" in name_lower or "vantar" in name_lower or "glove" in name_lower or "handskar" in name_lower:
